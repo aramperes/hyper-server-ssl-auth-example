@@ -12,10 +12,8 @@ use hyper::server::conn::Http;
 use hyper::service::service_fn_ok;
 use hyper::{Body, Request, Response};
 use openssl::nid::Nid;
-use openssl::x509::X509Ref;
 use openssl::x509::X509;
 use rustls::{Certificate, PrivateKey};
-use tokio::io::{self};
 use tokio::net::TcpListener;
 use tokio::prelude::{Future, Stream};
 use tokio_rustls::rustls::{AllowAnyAuthenticatedClient, RootCertStore, ServerConfig, Session};
@@ -68,17 +66,20 @@ fn main() {
             );
 
             // Read the CN from the client certificate using OpenSSL bindings
-            // TODO: This seems to break when killing a keep-alive session?
-            let client_cert = session.get_peer_certificates().unwrap().remove(0);
-            let x509: &X509Ref = &X509::from_der(client_cert.as_ref()).unwrap();
+            let client_cert = session
+                .get_peer_certificates()
+                .expect("did not receive any certificates")
+                .remove(0);
+            let x509 =
+                &X509::from_der(client_cert.as_ref()).expect("invalid X.509 peer certificate");
             let cn = x509
                 .subject_name()
                 .entries_by_nid(Nid::COMMONNAME)
                 .next()
-                .unwrap()
+                .expect("peer certificate does not contain a subject commonName")
                 .data()
                 .as_utf8()
-                .unwrap()
+                .expect("peer certificate commonName is not valid UTF-8")
                 .to_string();
 
             // Create a Hyper service to handle HTTP
@@ -87,7 +88,7 @@ fn main() {
             // Use the Hyper service using the decrypted stream
             let http = Http::new();
             http.serve_connection(tls_stream, service)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
         });
         tokio::spawn(handler.map_err(|e| eprintln!("Error: {:}", e)));
         Ok(())
