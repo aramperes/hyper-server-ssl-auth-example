@@ -58,38 +58,53 @@ fn main() {
     let socket = TcpListener::bind(&addr).unwrap();
 
     let future = socket.incoming().for_each(move |tcp_stream| {
-        let handler = acceptor.accept(tcp_stream).and_then(move |tls_stream| {
-            let (tcp_stream, session) = tls_stream.get_ref();
-            println!(
-                "Received connection from peer {}",
-                tcp_stream.peer_addr().unwrap()
-            );
+        let handler = acceptor
+            .accept(tcp_stream) // Decrypts the TCP stream
+            .and_then(move |tls_stream| {
+                let (tcp_stream, session) = tls_stream.get_ref();
+                println!(
+                    "Received connection from peer {}",
+                    tcp_stream.peer_addr().unwrap()
+                );
 
-            // Read the CN from the client certificate using OpenSSL bindings
-            let client_cert = session
-                .get_peer_certificates()
-                .expect("did not receive any certificates")
-                .remove(0);
-            let x509 =
-                &X509::from_der(client_cert.as_ref()).expect("invalid X.509 peer certificate");
-            let cn = x509
-                .subject_name()
-                .entries_by_nid(Nid::COMMONNAME)
-                .next()
-                .expect("peer certificate does not contain a subject commonName")
-                .data()
-                .as_utf8()
-                .expect("peer certificate commonName is not valid UTF-8")
-                .to_string();
+                // Get peer certificates from session
+                let client_cert = match session.get_peer_certificates() {
+                    None => return Err(io_err("did not receive any peer certificates")),
+                    Some(mut peer_certs) => peer_certs.remove(0), // Get the first cert
+                };
 
-            // Create a Hyper service to handle HTTP
-            let service = service_fn_ok(move |req| hello_world(req, cn.clone()));
+                // Parse X.509 certificate using OpenSSL bindings
+                let x509 = &X509::from_der(client_cert.as_ref());
+                let x509 = match x509 {
+                    Err(_) => return Err(io_err("invalid X.509 peer certificate")),
+                    Ok(x509) => x509,
+                };
 
-            // Use the Hyper service using the decrypted stream
-            let http = Http::new();
-            http.serve_connection(tls_stream, service)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
-        });
+                let cn_entry = match x509.subject_name().entries_by_nid(Nid::COMMONNAME).next() {
+                    None => {
+                        return Err(io_err(
+                            "peer certificate does not contain a subject commonName",
+                        ))
+                    }
+                    Some(entry) => entry,
+                };
+
+                let cn = match cn_entry.data().as_utf8() {
+                    Err(_) => return Err(io_err("peer certificate commonName is not valid UTF-8")),
+                    Ok(cn) => cn,
+                };
+
+                Ok((tls_stream, cn.to_string()))
+            })
+            .and_then(move |(tls_stream, cn)| {
+                // Create a Hyper service to handle HTTP
+                let service = service_fn_ok(move |req| hello_world(req, cn.clone()));
+
+                // Use the Hyper service using the decrypted stream
+                let http = Http::new();
+                http.serve_connection(tls_stream, service)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+            });
         tokio::spawn(handler.map_err(|e| eprintln!("Error: {:}", e)));
         Ok(())
     });
@@ -99,4 +114,8 @@ fn main() {
 
 fn hello_world(_req: Request<Body>, cn: String) -> Response<Body> {
     Response::new(Body::from(format!("Hello, {}!\n", cn)))
+}
+
+fn io_err(e: &str) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::Other, e)
 }
