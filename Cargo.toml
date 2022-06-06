@@ -6,7 +6,7 @@ edition = "2018"
 
 [dependencies]
 hyper = "0.12.35"
-tokio = "0.1.22"
+tokio = "1.8.4"
 tokio-rustls = "0.10.1"
 rustls = "0.16.0"
 openssl = "0.10.24"
