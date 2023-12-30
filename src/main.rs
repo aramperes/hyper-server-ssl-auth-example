@@ -1,5 +1,4 @@
 extern crate hyper;
-extern crate openssl;
 extern crate rustls;
 extern crate tokio;
 extern crate tokio_rustls;
@@ -11,13 +10,12 @@ use std::sync::Arc;
 use hyper::server::conn::Http;
 use hyper::service::service_fn_ok;
 use hyper::{Body, Request, Response};
-use openssl::nid::Nid;
-use openssl::x509::X509;
 use rustls::{Certificate, PrivateKey};
 use tokio::net::TcpListener;
 use tokio::prelude::{Future, Stream};
 use tokio_rustls::rustls::{AllowAnyAuthenticatedClient, RootCertStore, ServerConfig, Session};
 use tokio_rustls::TlsAcceptor;
+use x509_parser::prelude::{FromDer, X509Certificate};
 
 /// Load the server certificate
 fn load_cert(filename: &str) -> Vec<Certificate> {
@@ -74,25 +72,16 @@ fn main() {
                 };
 
                 // Parse X.509 certificate using OpenSSL bindings
-                let x509 = &X509::from_der(client_cert.as_ref());
-                let x509 = match x509 {
-                    Err(_) => return Err(io_err("invalid X.509 peer certificate")),
-                    Ok(x509) => x509,
-                };
-
-                let cn_entry = match x509.subject_name().entries_by_nid(Nid::COMMONNAME).next() {
-                    None => {
-                        return Err(io_err(
-                            "peer certificate does not contain a subject commonName",
-                        ))
-                    }
-                    Some(entry) => entry,
-                };
-
-                let cn = match cn_entry.data().as_utf8() {
-                    Err(_) => return Err(io_err("peer certificate commonName is not valid UTF-8")),
-                    Ok(cn) => cn,
-                };
+                let (_, cert) = X509Certificate::from_der(client_cert.as_ref()).map_err(|_| {
+                    io_err("invalid X.509 peer certificate")
+                })?;
+                let cert_subject = cert.subject();
+                let cn_entry = cert_subject.iter_common_name().next().ok_or_else(|| {
+                    io_err("peer certificate does not contain a subject commonName")
+                })?;
+                let cn = cn_entry.as_str().map_err(|_| {
+                    io_err("peer certificate commonName is not valid UTF-8")
+                })?;
 
                 Ok((tls_stream, cn.to_string()))
             })
